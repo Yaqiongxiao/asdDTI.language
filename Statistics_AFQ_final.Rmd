@@ -1,0 +1,1127 @@
+---
+title: "StatisticalAnalysis_AFQ"
+output:
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+setwd("/Users/YQ/OneDrive/Research/Shenzhen/2.ASD/4.ASDDTI")
+here::set_here(path = "/Users/YQ/OneDrive/Research/Shenzhen/2.ASD/4.ASDDTI")
+
+detach("package:here", unload=TRUE)
+
+# Set up 
+```{r message=FALSE, results='hide'}
+packages <- c("here","psych","dplyr","tidyr", "readr", "broom", "ggplot2","perm",
+              "gridExtra","ggpubr","car","purrr","stringr")
+
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# Prepare data
+```{r}
+AFQ_data <- read_csv("data/merged.csv",show_col_types = FALSE)
+Beh <- readxl::read_excel("data/DTI_info_sorted_8.13.xlsx", sheet = 1)
+colnames(Beh)
+print(unique(AFQ_data$tractID))
+AFQ_data <- AFQ_data %>%
+  filter(tractID %in% c("Left_Arcuate","Right_Arcuate",
+                        "Left_Inferior_Longitudinal","Right_Inferior_Longitudinal",
+                        "Left_Superior_Longitudinal","Right_Superior_Longitudinal",
+                        "Left_Inferior_Fronto_occipital",
+                        "Right_Inferior_Fronto_occipital"))
+print(colnames(Beh))
+colnames(Beh)[12:14] <- c("ADOS_SA","ADOS_RRB","ADOS_Total")
+Beh <- within(Beh, {
+  Dx <- as.factor(Dx)
+  Gender <- as.factor(Gender)
+  Age <- as.numeric(Age)
+  ADOS_SA <- as.numeric(ADOS_SA)
+  ADOS_RRB <- as.numeric(ADOS_RRB)
+  ADOS_Total <- as.numeric(ADOS_Total)
+  CARS <- as.numeric(CARS)
+})
+
+tmp <- merge(AFQ_data,Beh,by = 'subject_id' )
+colnames(tmp)[4:7]
+data <- tmp %>% 
+  pivot_longer(cols = colnames(tmp)[4:7], names_to = "metric", 
+               values_to = "value")
+
+# Calculate the average DTI metrics across the 100 nodes for each subject
+# within each tract
+data_avg <- data %>%
+  group_by(subject_id, tractID, metric) %>%
+  summarise(
+    avg_value = mean(value),
+    across(c(Gender, Age, Dx, Gesell_Adpt, Gesell_GrM, Gesell_FineM, Gesell_Lang, 
+             Gesell_Social, Gesell_Total, ADOS_SA, ADOS_RRB, ADOS_Total), first),
+    .groups = 'drop'
+  )
+
+View(data_avg)
+write.csv(data_avg, 'data/FAQ_Beh_data.csv') 
+# write.csv(data_avg, '../results/all_data_avg.csv') 
+
+```
+
+# Descriptive statistics: 
+```{r}
+Beh$Dx <- factor(Beh$Dx, levels = c("TD", "ASD"))
+
+colnames(Beh)[c(5,4,16,15,12:14,6:11)]
+mean_all <- describeBy(Beh[,c(5,4,16,15,12:14,6:11)], group ="Dx")
+
+
+demo <- as.data.frame(
+  cbind(paste0(round(mean_all[[1]][2:13,]$mean,2), "±",
+               round(mean_all[[1]][2:13,]$sd,2)),
+        paste0(round(mean_all[[1]][2:13,]$min,2), "-",
+               round(mean_all[[1]][2:13,]$max,2)),
+        paste0(round(mean_all[[2]][2:13,]$mean,2), "±",
+               round(mean_all[[2]][2:13,]$sd,2)),
+        paste0(round(mean_all[[2]][2:13,]$min,2), "-",
+               round(mean_all[[2]][2:13,]$max,2))
+  ))
+
+
+rownames(demo) <- rownames(mean_all[[1]])[2:13]
+
+for (bb in rownames(demo)[c(1,2,7:12)]){
+  
+  if (!all(is.na(Beh[Beh$Dx == "TD", bb]))) {
+    t_test <- t.test(Beh[Beh$Dx=="TD",bb],Beh[Beh$Dx=="ASD",bb],
+                      var.equal = TRUE,na.action = T)
+    demo[bb,5:6] <- c(round(t_test$statistic,3),round(t_test$p.value,3))
+  }
+}
+
+# Gender
+df <- table(Beh$Gender, Beh$Dx)
+demo[13,c(1,3)] <- c(paste0(df[2,1],"/",df[1,1]),
+                     paste0(df[2,2],"/",df[1,2]))
+gender_fisher <- fisher.test(df)
+demo[13,c(5:6)] <- round(c(gender_fisher$estimate,gender_fisher$p.value),2)
+rownames(demo)[13] <- "Gender(M/F)"
+colnames(demo) <- c("TD_mean±SD","TD_range","ASD_mean±SD","ASD_range",
+                    "Estimate","p_value")
+
+demo <- demo[c(1,13,2:12),]
+demo[4:7,1:2] <- NA
+
+# write.csv(demo,'../results/Descriptive.csv')
+```
+
+# Lateralization analysis and barplots
+```{r}
+## prepare data for lateralization analysis
+roi <- c("Left_Arcuate","Left_Inferior_Fronto_occipital",
+         "Right_Arcuate","Right_Inferior_Fronto_occipital",
+         "Left_Inferior_Longitudinal","Left_Superior_Longitudinal",
+         "Right_Inferior_Longitudinal","Right_Superior_Longitudinal")
+
+data_new <- data_avg %>% filter(tractID %in% roi)
+
+#View(data_new)
+
+data_new$tractName <- sub("^(Left_|Right_)", "", data_new$tractID)
+data_new$hem <- sub("_(.*)$", "", data_new$tractID)
+
+data_lat <- data_new %>% 
+  group_by(subject_id, tractName, metric) %>%
+  reframe(lat = (avg_value[hem=="Right"]-avg_value[hem=="Left"])/(avg_value[hem=="Right"]+avg_value[hem=="Left"]),
+            Dx = first(Dx),
+            Age = first(Age),
+            Gender = first(Gender),
+            Gesell_Lang = first(Gesell_Lang))
+
+write.csv(data_lat, "results/Lateralization_Index.csv", row.names = FALSE)
+
+##  One-sample t-test
+set.seed(123)
+
+data_lat <- read.csv("results/Lateralization_Index.csv")
+lateralization_one_sample_ttest <- data.frame()
+i <- 0
+for (dd in unique(data_lat$metric)){
+  for (tt in unique(data_lat$tractName)){
+    for (gg in c("ASD","TD")){
+    i <- i+1
+    df_new <- data_lat %>% filter(metric == dd & tractName == tt &
+                              Dx == gg)
+    
+    # one-sample t-test
+    observed_t <- as.numeric(t.test(df_new$lat, mu = 0)$statistic)
+    observed_p <- as.numeric(t.test(df_new$lat, mu = 0)$p.value)
+    
+    # permutation test
+    perm_t_values <- numeric()
+    for (j in 1:5000) {
+      perm_data <- df_new
+      n <- length(perm_data$lat)
+      centered_x <- perm_data$lat - mean(perm_data$lat)
+      
+      perm_sample <- sample(centered_x, n, replace = TRUE)
+ 
+      perm_t_values[j] <- as.numeric(t.test(perm_sample, mu = 0)$statistic)
+    }
+    
+    p_value_perm <- mean(abs(perm_t_values) >= abs(observed_t))
+    
+    
+    mean_value <-round(mean(df_new$lat),3)
+    sd_value <- round(sd(df_new$lat),3)
+    se_value <- round(sd_value/sqrt(nrow(df_new)),3)
+    
+    lateralization_one_sample_ttest[i,1:9] <- c(dd,tt,gg,
+                                                mean_value,sd_value,se_value,
+                                                observed_t,
+                                                observed_p,
+                                                p_value_perm)
+    
+    }
+  }
+}
+colnames(lateralization_one_sample_ttest) <- c("metric","tractName","Dx",
+                                               "mean","sd","se","t_value",
+                                               "p_value","p_value_perm")
+write.csv(lateralization_one_sample_ttest,
+          "results/LI_one_sample_ttest_with_permutation.csv", 
+          row.names = FALSE)
+
+##  two-sample t-tests
+set.seed(123)
+data_lat <- read.csv("results/Lateralization_Index.csv")
+
+lateralization_two_sample_ttest <- data.frame()
+i <- 0
+for (dd in unique(data_lat$metric)){
+  for (tt in unique(data_lat$tractName)){
+      
+    i <- i+1
+    df_new <- data_lat %>% filter(metric == dd & tractName == tt )
+    
+    # two-sample t-test
+    t_test_result <- t.test(lat ~ Dx, data=df_new)
+    observed_t <- t_test_result$statistic
+    observed_p <- t_test_result$p.value
+    
+    # permutation test
+    perm_t_values <- numeric()
+    for (j in 1:5000) {
+      perm_data <- df_new
+      perm_data$Dx <- sample(perm_data$Dx)
+      perm_t_values[j] <- t.test(lat ~ Dx, data=perm_data)$statistic
+    }
+    p_value_perm <- mean(abs(perm_t_values) >= abs(observed_t))
+    
+    lateralization_two_sample_ttest[i,1:5] <- c(dd,tt,observed_t,observed_p,
+                                                p_value_perm)
+  }
+}
+colnames(lateralization_two_sample_ttest) <- c("metric","tractName",
+                                               "t_value","p_value","p_value_perm")
+
+write.csv(lateralization_two_sample_ttest,
+          "results/LI_two_sample_ttest_with_permutation.csv", row.names = FALSE)
+
+
+## bar plots for LI
+aa <- read.csv("results/LI_one_sample_ttest_with_permutation.csv")
+View(aa)
+for (dd in unique(aa$metric)){
+  df <- aa %>% filter(metric == dd)
+  p <- ggplot(df, aes(x = roi, y = mean, fill = Dx)) +
+    geom_bar(stat = "identity", position = position_dodge(), width = 0.7) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se),size=1.5,
+                  width = 0.2, position = position_dodge(0.7)) +
+    geom_hline(yintercept = 0, color = "black",size=1) + 
+    labs(title = paste0(dd), 
+           x = NULL, y = NULL) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.length = unit(0.25, "cm"), 
+      axis.ticks.x = element_line(size=1), 
+      axis.ticks.y = element_line(size=1), 
+      axis.line.x = element_line(size = 2.5),
+      axis.line.y = element_line(size = 2.5),
+      legend.position = "none")+
+    scale_fill_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC"))
+  
+    ggsave(paste0("results/",dd,".png"),plot = p, width = 12, height = 10)
+}
+
+```
+
+# Correlation between LI and Gesell language
+```{r}
+set.seed(123)
+correlation_results <- data.frame()
+
+data_lat <- read.csv("results/Lateralization_Index.csv")
+
+tmp <- data_lat
+tmp$Dx <- "All"
+df <- rbind(data_lat, tmp)
+
+df$gender[df$Gender == "M"] <- 1
+df$gender[df$Gender == "F"] <- 2
+
+i <- 0
+for (dd in unique(df$metric)){
+  for (tt in unique(df$tractName)){
+    for (gg in unique(df$Dx)){
+      i <- i+1
+      df_new <- df %>% filter(metric == dd & tractName == tt &
+                                        Dx == gg)
+  
+      formula <- formula(lat ~ Gesell_Lang + Age + Gender)
+      model <- lm(formula, data = df_new)
+      
+      observed_coeff <- summary(model)$coefficients[2, "Estimate"]
+      observed_p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+      
+      
+      cor_r <- cor.test(df_new$lat, df_new$Gesell_Lang)
+      
+      ppcor <- ppcor::pcor.test(df_new$lat, df_new$Gesell_Lang,
+      			  df_new[,c("Age","gender")])
+
+      
+      # Perform permutation test
+      #permuted_coeffs <- numeric()
+      #for (j in 1:5000) {
+      #  perm_data <- df_new
+      #  perm_data$lat <- sample(perm_data$lat)
+       # permuted_model <- lm(lat ~ Gesell_Lang + Age + Gender, data = perm_data)
+       # permuted_coeffs[j] <- summary(permuted_model)$coefficients[2, "Estimate"]
+      # }
+      
+      #p_value_perm <- mean(abs(permuted_coeffs) >= abs(observed_coeff))
+      
+      correlation_results[i,1:7] <- c(dd,tt,gg,observed_coeff,observed_p_value,
+                                     cor_r$estimate,ppcor$estimate)
+    
+    }
+  }
+}
+
+colnames(correlation_results) <- c("DTI_metric","tractName","Dx",
+                                   "regression_coefficients",
+				   "P_value","r_value","ppr_value")
+
+View(correlation_results)
+
+write.csv(correlation_results, "results/cor_LI_Lang_v2.csv", row.names = FALSE)
+
+## significant correlation results
+sig_cor <- correlation_results[correlation_results$perm_p_value < 0.05,]
+correlation_results[correlation_results$DTI_metric == sig_cor$DTI_metric[] & 
+		    	correlation_results$tractName == sig_cor$tractName[2],][1:2,]
+
+## scatter plots
+aa <- read.csv("results/cor_LI_Lang.csv")
+data_lat <- read.csv("results/Lateralization_Index.csv")
+
+df <- aa %>% filter(P_value < 0.05)
+
+df$DTI_metric <- gsub("lateralization", "avg_dti", df$DTI_metric)
+
+for (i in 1:nrow(df)){
+  data_new <- data_lat %>% filter(metric == df$DTI_metric[i] &
+                                    tractName == df$tractName[i])
+  
+  formula <- formula(lat ~ Gesell_Lang + Age + Gender)
+  model_ASD <- lm(formula, data = data_new[data_new$Dx == "ASD",])
+  model_TD <- lm(formula, data = data_new[data_new$Dx == "TD",])
+  pred_ASD <- predict(model_ASD, newdata = data_new[data_new$Dx == "ASD",])
+  pred_TD <- predict(model_TD, newdata = data_new[data_new$Dx == "TD",])
+  data_new$pred[data_new$Dx == "TD"] <- pred_TD
+  data_new$pred[data_new$Dx == "ASD"] <- pred_ASD
+  
+  title <- paste0(df$DTI_metric[i],"_",df$tractName[i])
+  
+  p <- ggplot(data_new, aes(x = Gesell_Lang, y = lat, color = Dx)) +
+    geom_point(aes(color = Dx),size = 3.5) +
+    stat_smooth( method = "lm", aes(y = pred), se = FALSE,
+                size = 1.8) +
+    labs(title = title,x = NULL, y = NULL) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+      #axis.text = element_blank(),
+      axis.line.x = element_line(size = 1.5),
+      axis.line.y = element_line(size = 1.5),
+      legend.position = "none")+
+    scale_color_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC"))  
+  
+  ggsave(paste0("results/",title,"_lat.png"), plot = p, width = 5, height = 4)
+}
+
+```
+
+# Group comparison at the entire tract 
+```{r}
+ANCOVA_mean_node_results <- data.frame()
+set.seed(123)
+i <- 0
+for (dd in unique(data_avg$metric)){
+  for (tt in unique(data_avg$tractID)){
+    
+    i <- i+1
+    data_new <- data_avg %>% filter(tractID == tt & metric == dd)
+    
+    # ANOVA for each metric
+    fl <- formula(avg_value ~ Dx + Age + Gender)
+    anova_gr <- car::Anova(lm(fl, data_new), type ="III")
+    observed_f <- anova_gr$`F value`[2]
+    observed_p <- anova_gr$`Pr(>F)`[2]
+    
+    # Perform permutation test by shuffling the group labels
+    
+    perm_f_values <- numeric()
+    for (j in 1:5000) {
+      perm_data <- data_new
+      perm_data$Dx <- sample(perm_data$Dx)
+      perm_anova <- car::Anova(lm(fl, perm_data), type="III")
+      perm_f_values[j] <- perm_anova$`F value`[2]
+      }
+    p_value_perm <- mean(abs(perm_f_values) >= abs(observed_f))
+    
+    # Calculate mean DTI values for ASD and TD groups
+    ASD_mean <- mean(data_new$avg_value[data_new$Dx == "ASD"], na.rm = TRUE)
+    TD_mean <- mean(data_new$avg_value[data_new$Dx == "TD"], na.rm = TRUE)
+    
+    ANCOVA_mean_node_results[i,1:7] <- c(dd,tt, ASD_mean, TD_mean,
+                                        observed_f,
+                                        observed_p,
+                                        p_value_perm)
+    
+  }
+}
+
+colnames(ANCOVA_mean_node_results) <- c("metric","tractID","mean_ASD","mean_TD",
+                                        "F_value","p_value","p_value_perm")
+
+write.csv(ANCOVA_mean_node_results,'results/tract_mean_node_anova_results.csv',
+	  row.names = FALSE)
+
+
+## Violin plots showing for group comparison between ASD and TD for each DTI metric (FA, MD, RD, AD) within each tract
+
+# Loop over each DTI metric
+for (mm in unique(data_avg$metric)) {
+  
+  data_new <- data_avg %>% filter(metric == mm)
+  
+  # Create the plot
+  p <- ggplot(data_new, aes_string(x = "tractID", y = "avg_value", fill = "Dx")) +
+    geom_violin(trim = FALSE, alpha = 1, width = 0.8, aes(fill = Dx),size=1.5) +
+    geom_boxplot(aes(Dx = interaction(Dx,"tractID")), 
+                 position = position_dodge(0.8),
+                 color = "white", size=1.5,
+                 width = 0.2, show.legend = FALSE, outlier.shape=NA) +
+    geom_point(position = position_jitterdodge(0.2), size = 3,color = "black") +
+    labs(x = NA, y = NA) +
+    theme_classic() +
+    theme(axis.ticks.length = unit(0.25, "cm"), 
+          axis.text = element_blank(),
+          axis.title = element_blank(),
+          axis.line.x = element_line(size = 2),
+          axis.line.y = element_line(size = 2),
+          legend.position = "none") +
+    scale_fill_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC")) 
+  
+  # Print the plot to ensure it looks correct
+  print(p)
+  
+  # Save the plot with a unique filename
+  ggsave(filename = paste0('../figures/Violin/grouped_violin_', mm, '.png'), 
+         plot = p, height = 6, width = 20, dpi = 300)
+}
+
+```
+
+# Group comparison at point-wise levels within each tractID
+```{r}
+set.seed(123)
+
+tract_each_node_anova_results <- data.frame()
+
+i <- 0
+for (dd in unique(data$metric)){
+  for (tt in unique(data$tractID)){
+    
+    data_new <- data %>% filter(tractID == tt & metric == dd)
+    
+    for (nn in 0:99){
+      i <- i+1
+      data_new_nn <- data_new %>% filter(nodeID == nn)
+      
+      # Define the models for each scalar metric
+      model <- lm(as.formula(value ~ Dx + Age + Gender), data = data_new_nn)
+      
+      ## Perform permutation tests using custom function
+      observed_anova <- car::Anova(model,type="III")
+      observed_statistic <- observed_anova$`F value`[2]
+      observed_p <- observed_anova$`Pr(>F)`[2]
+      
+      # Permutation loop
+      perm_f_values <- numeric()
+      for (j in 1:5000) {
+        perm_data <- data_new_nn
+        perm_data$Dx <- sample(perm_data$Dx)
+        perm_model <- lm(as.formula(value ~ Dx + Age + Gender), 
+                         data = perm_data)
+        perm_anova <- car::Anova(perm_model,type="III")
+        perm_f_values[j] <- perm_anova$`F value`[2]
+      }
+      
+      p_value_perm <- mean(perm_f_values >= observed_statistic, na.rm = TRUE)
+      
+      # Calculate mean DTI values for ASD and TD groups
+      ASD_mean <- mean(data_new_nn$value[data_new_nn$Dx == "ASD"], na.rm = TRUE)
+      TD_mean <- mean(data_new_nn$value[data_new_nn$Dx == "TD"], na.rm = TRUE)
+    
+      tract_each_node_anova_results[i,1:8] <- c(dd,tt,nn,ASD_mean,TD_mean,
+                                              observed_statistic,
+                                              observed_p,
+                                              p_value_perm)
+    }  
+  }
+}
+
+colnames(tract_each_node_anova_results) <- c("metric","tractID","nodeID","mean_ASD","mean_TD",
+                                        "F_value","p_value","p_value_perm")
+
+write.csv(tract_each_node_anova_results,
+	  "results/tract_each_node_f_test_results.csv", row.names = FALSE)
+
+## Curve plots: group comparsion point-wise
+# new data
+data_curve <- read.csv("../results/tract_each_node_f_test_results.csv")
+
+# old data
+# data_curve <- read.csv("../tables/group_comparison_point_wise/tract_each_node_f_test_results.csv")
+
+scale_map <- list(
+  dti_fa = list(breaks = seq(0.2, 0.7, by = 0.1), limits = c(0.2, 0.7)),
+  dti_rd = list(breaks = seq(0.00048, 0.00088, by = 0.0001), limits = c(0.00048, 0.00088)),
+  dti_ad = list(breaks = seq(0.0010, 0.0018, by = 0.0002), limits = c(0.0010, 0.0018)),
+  dti_md = list(breaks = seq(0.0008, 0.0011, by = 0.0001), limits = c(0.0008, 0.0011))
+)
+
+for (dd in unique(data_curve$metric)){
+  for (tt in unique(data_curve$tractID)){
+
+    df <- data %>% filter(metric == dd & tractID == tt)
+
+    summary_data <- df %>% group_by(nodeID, Dx) %>% 
+      summarise(mean_value = mean(value,na.rm = TRUE),
+                sd_value = sd(value, na.rm = TRUE),
+                min_value = min(value),
+                max_value = max(value),
+                .groups = "drop")
+    
+    # find consecutive idx 
+    data_curve_new <- data_curve %>% filter(metric == dd & tractID == tt)
+    idx <- which(data_curve_new$p_value < 0.05)
+    idx <- idx -1
+    target <- list()
+    if (length(idx) >= 3) {
+      start <- 1
+      for (i in 2:length(idx)) {
+        if (idx[i] != idx[i - 1] + 1) {
+          if (i - start >= 3) {
+            target[[length(target) + 1]] <- idx[start:(i - 1)]
+            }
+          start <- i 
+        }
+        }
+      if (start <= length(idx) - 2) {
+        target[[length(target) + 1]] <- idx[start:length(idx)]
+      }
+      }
+
+    if (length(target)>0){
+    # prepare for plot
+    y_range <- max(df$value) - min(df$value)
+    y_padding <- y_range * 0.1  # 10% of the range as padding
+    y_min <- min(df$value) - y_padding
+    y_max <- max(df$value) + y_padding
+    
+    
+    # plot
+    p <- ggplot(data = summary_data, aes(x = nodeID, y = mean_value, color = Dx)) +
+      geom_line(size = 3, alpha = 1) +
+      # geom_ribbon(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value, fill = Dx),
+      #             alpha = 0.2, color = NA) +
+      scale_x_continuous(breaks = seq(0, 100, by = 20)) +
+      scale_y_continuous(breaks = scale_map[[dd]]$breaks, 
+                         limits = scale_map[[dd]]$limits,
+                         labels = NULL)+
+      scale_color_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC")) +
+      scale_fill_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC")) +
+      theme_classic() +
+      labs(title = paste0(dd," ",tt), x = NULL, y = NULL) +
+      theme(axis.ticks.length = unit(0.25, "cm"), 
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+        axis.text = element_blank(),
+        axis.line.x = element_line(size = 1.5),
+        axis.line.y = element_line(size = 1.5),
+        legend.position = "none")
+    
+    if (!(length(target) == 0)){
+      shaded_df <- data.frame()
+      for (nn in 1:length(target)){
+        ss <- target[[nn]]
+        shaded_df[nn,1:4] <- c(min(ss),max(ss),-Inf,Inf)    
+      }
+      colnames(shaded_df) <- c("xmin","xmax","ymin","ymax")
+      p <- p + geom_rect(data = shaded_df, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+                inherit.aes = FALSE, fill = "gray", colour = NA, alpha = 0.5)
+    }
+    
+    print(p)
+    # Save the plot
+    ggsave(filename = paste0("../figures/curve_new/",dd, "_", tt,".png"),
+           plot = p, width = 5, height = 4)
+    
+    }
+
+  }
+}
+```
+
+# Correlation between Gesell_Lang & mean DTI metric (tract-wise level)
+```{r}
+correlation_results <- data.frame()
+
+    data_avg$Gesell_Lang <- as.numeric(data_avg$Gesell_Lang)
+    data_avg$gender <- NA
+    data_avg$gender[data_avg$Gender=="M"] <- 1 
+    data_avg$gender[data_avg$Gender=="F"] <- 2
+    
+    #View(data_avg)
+
+i <- 0
+for (dd in unique(data_avg$metric)){
+  for (tt in unique(data_avg$tractID)){
+    for (gg in c("ASD","TD")){
+    
+    i <- i+1
+    data_new <- data_avg %>% filter(metric == dd & tractID == tt &
+                                       Dx == gg)
+    
+    data_new$Gender <- as.factor(data_new$Gender)
+    
+    model <- lm(avg_value ~ Gesell_Lang + Age + Gender, data = data_new)
+    observed_coeff <- summary(model)$coefficients[2, "Estimate"]
+    observed_p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+    
+    cor_r_pred <- cor.test(predict(model), data_new$Gesell_Lang)
+    cor_r <- cor.test( data_new$Gesell_Lang, data_new$avg_value)
+    
+    pcor_r <- ppcor::pcor.test(data_new$Gesell_Lang,data_new$avg_value, data_new[,c("Age","gender")])
+        
+    # Perform permutation test
+    #set.seed(123)
+    #permuted_coeffs <- numeric()
+   # for (j in 1:5000) {
+   #   perm_data <- data_new
+    #  perm_data$avg_value <- sample(perm_data$avg_value)
+   #   permuted_model <- lm(avg_value ~ Gesell_Lang + Age + Gender, data = perm_data)
+    #  permuted_coeffs[j] <- summary(permuted_model)$coefficients[2, "Estimate"]
+    #  }
+   # p_value_perm <- mean(abs(permuted_coeffs) >= abs(observed_coeff))
+    
+    #correlation_results[i,1:8] <- c(tt,dd,gg,observed_coeff,observed_p_value,
+     #                               p_value_perm,cor_r$estimate,pcor_r$estimate)
+    
+    correlation_results[i,1:8] <- c(tt,dd,gg,observed_coeff,observed_p_value,
+                                    cor_r_pred$estimate, cor_r$estimate,pcor_r$estimate)
+    }
+  }
+}
+
+colnames(correlation_results) <- c("tractID","DTI_metric","group",
+				   "regression_coefficients",
+                                   "P_value","cor_r_value","cor_r_value",
+				   "pcor_r_value")
+
+View(correlation_results)
+
+write.csv(correlation_results, "results/correlation_tract_Lang2.csv", 
+	  row.names = FALSE)
+
+## test correlation analysis
+residuals(data_new$Gesell_Lang, data_new[,c("Age","gender")])
+
+
+
+# scatter plots for significant correlation between Gesell_Lang & mean DTI metric 
+
+aa <- read.csv("results/correlation_tract_Lang.csv")
+
+plot_data <- aa %>% filter(perm_p_value < 0.05)
+
+#View(plot_data)
+
+ggplot(data_new[data_new$Dx == "TD", ], aes_string(x = "Gesell_Lang", 
+						   y = "avg_value",color = "Dx")) +
+    geom_point(size = 3.5) +
+   geom_smooth(method = "lm", aes(y = pred),se = FALSE,size=1.8) + 
+    #geom_line(aes(y = pred), size=1.8)
+
+cor.test(as.numeric(data_new$Gesell_Lang[data_new$Dx == "TD"]), 
+	 as.numeric(data_new$avg_value[data_new$Dx == "TD"]))
+
+for (i in 1:nrow(plot_data)){
+	
+  data_new <- data_avg %>% filter(tractID == plot_data$tractID[i] &
+                                    metric == plot_data$DTI_metric[i])
+  
+  fl <- formula(avg_value ~ Gesell_Lang + Age + Gender)
+  
+  models <- data_new %>% split(.$Dx) %>% map(~ lm(fl, data = .x))
+  
+  data_new <- data_new %>%
+    mutate(pred = case_when(
+      Dx == "ASD" ~ predict(models[["ASD"]], newdata = .),
+      Dx == "TD" ~ predict(models[["TD"]], newdata = .)))
+  
+  p <-  ggplot(data_new, aes_string(x = "Gesell_Lang", y = "avg_value",color = "Dx")) +
+    geom_point(size = 3.5) +
+   geom_smooth(method = "lm", se = FALSE,size=1.8) + 
+    geom_line(aes(y = pred), size=1.8) + 
+    labs(title = paste0(plot_data$DTI_metric[i]," ", plot_data$tractID[i]), 
+         x = NULL, y = NULL) +
+    theme_classic() +
+    theme(axis.ticks.length = unit(0.25, "cm"), 
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+        #axis.text = element_blank(),
+        axis.line.x = element_line(size = 2),
+        axis.line.y = element_line(size = 2),
+        legend.position = "none")+
+    scale_color_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC"))
+  
+  ggsave(filename = paste0("results/Lang_tract_",plot_data$DTI_metric[i],
+  			  "_", plot_data$tractID[i],".png"),
+         plot = p, width = 6, height = 4)
+  
+  
+}
+```
+
+# Correlation between ADOS_Total_ASD & mean DTI metric (tract-wise level)
+```{r}
+correlation_ados_results <- data.frame()
+
+i <- 0
+for (dd in unique(data_avg$metric)){
+  for (tt in unique(data_avg$tractID)){
+    
+    i <- i+1
+    data_new <- data_avg %>% filter(metric == dd & tractID == tt &
+                                       Dx == "ASD")
+    data_new$Gender <- as.factor(data_new$Gender)
+    
+    model <- lm(avg_value ~ ADOS_Total + Age + Gender, data = data_new)
+    observed_coeff <- summary(model)$coefficients[2, "Estimate"]
+    observed_p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+    
+    cor_r <- cor.test(predict(model), data_new$ADOS_Total)
+        
+    # Perform permutation test
+    permuted_coeffs <- numeric()
+    set.seed(123)
+    for (j in 1:5000) {
+      perm_data <- data_new
+      perm_data$avg_value <- sample(perm_data$avg_value)
+      permuted_model <- lm(avg_value ~ ADOS_Total + Age + Gender, data = perm_data)
+      permuted_coeffs[j] <- summary(permuted_model)$coefficients[2, "Estimate"]
+      }
+    p_value_perm <- mean(abs(permuted_coeffs) >= abs(observed_coeff))
+    
+    correlation_ados_results[i,1:6] <- c(tt,dd,
+                                         observed_coeff,
+                                         observed_p_value,
+                                         p_value_perm,
+                                         cor_r$estimate)
+    
+  }
+}
+
+colnames(correlation_ados_results) <- c("tractID","DTI_metric","regression_coefficients",
+                                   "P_value","perm_p_value","cor_r_value")
+
+write.csv(correlation_ados_results, "../results/correlation_results_ADOS.csv", row.names = FALSE)
+
+# scatter plots 
+
+aa <- read.csv("results/correlation_results_ADOS.csv")
+
+plot_data <- aa %>% filter(perm_p_value < 0.05)
+
+for (i in 1:nrow(plot_data)){
+  data_new1 <- data_avg %>% filter(tractID == plot_data$tractID[i] &
+                                    metric == plot_data$DTI_metric[i] &
+                                     Dx == "ASD")
+  
+  fl <- formula(avg_value ~ ADOS_Total + Age + Gender)
+  models <- lm(fl, data = data_new1)
+  
+  data_new2 <- data_new1 %>%
+    mutate(pred = predict(models, newdata = data_new1))
+  
+  p <-  ggplot(data_new2, aes_string(x = "ADOS_Total", y = "avg_value")) +
+    #geom_point(size = 3.5, color="black") +
+    geom_smooth(method = "lm", se = FALSE, aes(y = pred),color="#e47159",size =1.5) +
+    geom_point(size = 5, color="#e47159") +
+    geom_smooth(method = "lm", se = FALSE, aes(y = pred),color="black",size =1.8) + 
+    labs(title = paste0(plot_data$DTI_metric[i]," ", plot_data$tractID[i]), 
+         x = NULL, y = NULL) +
+    theme_classic() +
+    theme(axis.ticks.length = unit(0.25, "cm"), 
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+        #axis.text = element_blank(),
+        axis.line.x = element_line(size = 2),
+        axis.line.y = element_line(size = 2),
+        legend.position = "none") 
+  
+  if (plot_data$DTI_metric[i] == "dti_rd") {
+  	p <- p + coord_cartesian(xlim = c(5, 25), ylim = c(0.0006, 0.0009))
+  } else if (plot_data$DTI_metric[i] == "dti_fa") {
+  	p <- p + coord_cartesian(xlim = c(5, 25), ylim = c(0.35, 0.5))
+  }
+  
+  ggsave(filename = paste0("results/",plot_data$DTI_metric[i], "_",
+  			 plot_data$tractID[i],"_ADOS.png"),width = 5, height = 4)
+  
+}
+```
+
+# Prepare data for signodes.
+```{r}
+data_curve <- read.csv("../results/tract_each_node_f_test_results.csv")
+
+# old data
+# data_curve <- read.csv("../tables/group_comparison_point_wise/tract_each_node_f_test_results.csv")
+
+avg_dti_signodes <- data.frame() 
+
+for (dd in unique(data_curve$metric)){
+  for (tt in unique(data_curve$tractID)){
+  # for (tt in unique(data_curve$roi)){
+    
+     df <- data %>% filter(metric == dd & tractID == tt)
+    
+    # find consecutive idx 
+    data_curve_new <- data_curve %>% dplyr::filter(metric == dd & tractID == tt)
+    # data_curve_new <- data_curve %>% dplyr::filter(metric == dd & roi == tt)
+    # idx <- which(data_curve_new$p_value_perm < 0.05)
+    idx <- which(data_curve_new$p_value < 0.05)
+    # idx <- which(data_curve_new$p_value < 0.05)
+    # idx <- which(data_curve_new$adjusted_p_value < 0.05)
+    idx <- idx - 1
+    
+    target <- list()
+    if (length(idx) >= 3) {
+      start <- 1
+      for (i in 2:length(idx)) {
+        if (idx[i] != idx[i - 1] + 1) {
+          if (i - start >= 3) {
+            target[[length(target) + 1]] <- idx[start:(i - 1)]
+            }
+          start <- i 
+        }
+        }
+      if (start <= length(idx) - 2) {
+        target[[length(target) + 1]] <- idx[start:length(idx)]
+      }
+      }
+    
+    # average sig. nodes
+    if (length(target)>0){
+      for (j in 1:length(target)){
+       df_new <- df %>% filter(nodeID %in% target[[j]])
+        
+        avg_dti_signodes_sub <- df_new %>%
+          group_by(subject_id) %>%
+          summarise(avg_value_signodes = mean(value),
+                    tractID = first(tractID),
+                    metric = first(metric),
+                    Gender = first(Gender),
+                    Age = first(Age),
+                    Dx = first(Dx),
+                    Gesell_Lang = first(Gesell_Lang),
+                    ADOS_Total = first(ADOS_Total),
+                    .groups = 'drop')
+        
+        avg_dti_signodes_sub <- avg_dti_signodes_sub %>%
+          mutate(signodes = paste(range(target[[j]]), collapse = "-") )
+        
+        avg_dti_signodes <- rbind(avg_dti_signodes, avg_dti_signodes_sub)
+      }
+    }
+    
+  }
+}
+avg_dti_signodes$signodes <- as.character(avg_dti_signodes$signodes )
+write.csv(avg_dti_signodes,'results/avg_dti_signodes.csv',row.names = FALSE)
+
+
+```
+
+# Correlation between Gesell_Lang & sig. nodes (point-wise)
+```{r}
+ set.seed(123)
+
+avg_dti_signodes <- read.csv("results/avg_dti_signodes.csv")
+avg_dti_signodes$gender <- NA
+avg_dti_signodes$gender[avg_dti_signodes$Gender == "M"] <- 1
+avg_dti_signodes$gender[avg_dti_signodes$Gender == "F"] <- 2
+
+correlation_results <- data.frame()
+i <- 0
+for (dd in unique(avg_dti_signodes$metric)){
+  for (tt in unique(avg_dti_signodes$tractID)){
+    
+    df <- avg_dti_signodes %>% filter(metric == dd & tractID == tt)
+    for (nn in unique(df$signodes)){
+      
+      df_new <- df %>% filter(signodes == nn)
+      
+      for (gg in c("ASD","TD")){
+        i <- i+1
+        data_new <- df_new %>% filter(Dx == gg)
+        
+        model <- lm(avg_value_signodes ~ Gesell_Lang + Age + Gender, data = data_new)
+        observed_coeff <- summary(model)$coefficients[2, "Estimate"]
+        observed_p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+        
+        cor_r <- cor.test(predict(model), data_new$Gesell_Lang)
+         ppcor <- ppcor::pcor.test(data_new$avg_value_signodes,
+         			  data_new$Gesell_Lang,
+         			  data_new[,c("Age","gender")])
+        
+        # Perform permutation test
+        permuted_coeffs <- numeric()
+        for (j in 1:5000) {
+          perm_data <- data_new
+          perm_data$avg_value_signodes <- sample(perm_data$avg_value_signodes)
+          permuted_model <- lm(avg_value_signodes ~ Gesell_Lang + Age + Gender,
+                               data = perm_data)
+          permuted_coeffs[j] <- summary(permuted_model)$coefficients[2, "Estimate"]
+          }
+        p_value_perm <- mean(abs(permuted_coeffs) >= abs(observed_coeff))
+        
+        correlation_results[i,1:9] <- c(tt,dd,gg,nn,
+                                        observed_coeff,
+                                        observed_p_value,
+                                        p_value_perm,
+                                        cor_r$estimate, ppcor$estimate)
+      }
+    }
+  }
+}
+
+colnames(correlation_results) <- c("tractID","DTI_metric","Dx","signodes",
+                                   "regression_coefficients",
+                                   "p_value","perm_p_value","cor_r_value",
+				   "PPcor_r_value")
+
+View(correlation_results)
+
+write.csv(correlation_results, "results/correlation_signodes_Lang.csv",
+	  row.names = FALSE)
+
+# scatter plots for significant correlation between Gesell_Lang & sig. nodes (point-wise)
+
+aa <- read.csv("results/correlation_signodes_Lang.csv")
+
+data_scatter <- aa %>% filter( p_value < 0.05)
+sig_nodes <- c(17:21)
+
+df_avg <- avg_dti_signodes
+
+for (dd in unique(data_scatter$DTI_metric)){ 
+  for (tt in unique(data_scatter$tractID)){
+
+    tmp <- data_scatter %>% filter(DTI_metric == dd & tractID == tt)
+    sig_nodes <- as.numeric(strsplit(tmp$signodes,"-")[[1]])
+    
+    df <- df_avg %>% filter(metric == dd & tractID == tt &
+                                 signodes %in% tmp$signodes)
+  
+    
+    # predict
+    formula <- formula(avg_value_signodes ~ Gesell_Lang + Age + Gender)
+    model_ASD <- lm(formula, data = df[df$Dx == "ASD",])
+    model_TD <- lm(formula, data = df[df$Dx == "TD",])
+    pred_ASD <- predict(model_ASD, newdata = df[df$Dx == "ASD",])
+    pred_TD <- predict(model_TD, newdata = df[df$Dx == "TD",])
+    df$pred <- NA
+    df$pred[df$Dx == "TD"] <- pred_TD
+    df$pred[df$Dx == "ASD"] <- pred_ASD
+    
+    p <- ggplot(df, aes(x = Gesell_Lang, y = avg_value_signodes,color = Dx)) +
+      geom_point(size = 3.5) +
+      stat_smooth(method = "lm", se = FALSE, 
+      	    aes(y = pred),size=1.8) +
+      labs(title = paste0(dd," ", tt), 
+           x = NULL, y = NULL) +
+       theme_classic() +
+      theme(axis.ticks.length = unit(0.25, "cm"), 
+        #axis.text = element_blank(),
+        axis.line.x = element_line(size = 2),
+        axis.line.y = element_line(size = 2),
+        legend.position = "none")+
+      scale_color_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC"))
+    
+    # Save the plot
+    ggsave(paste0("results/",dd,"_",tt,"_Gesell_Lang_signodes.png"), 
+           plot = p, width = 6, height = 4)
+    
+    
+  }
+}
+
+library(ggplot2)
+library(dplyr)
+
+# Fit the model
+model <- lm(avg_value ~ Gesell_Lang + Age + Gender, data = data_new)
+
+# Create a new data frame for predictions across a range of Gesell_Lang for each group
+prediction_data <- data_new %>%
+  group_by(Dx) %>%
+  summarize(Age = mean(Age),       # Use average Age for predictions
+            Gender = "Male",       # Set Gender to one category; adjust as necessary
+            Gesell_Lang = seq(min(Gesell_Lang), max(Gesell_Lang), length.out = 100)) %>%
+  ungroup()
+
+# Add predicted values to the prediction_data
+prediction_data <- prediction_data %>%
+  mutate(predicted_values = predict(model, newdata = prediction_data))
+
+# Plot the data and the fitted lines
+ggplot(data_new, aes(x = Gesell_Lang, y = avg_value, color = Dx)) +
+  geom_point(size = 3) +  # Scatter plot points for original data
+  geom_line(data = prediction_data, aes(y = predicted_values), size = 1.2) + # Fitted line from predictions
+  labs(title = "Fitted Regression Lines for ASD and TD Groups",
+       x = "Gesell Language Score",
+       y = "Average Value") +
+  theme_minimal() +
+  scale_color_manual(values = c("ASD" = "#e47159", "TD" = "#6699CC"))
+
+```
+
+# Correlation between ADOS & sig. nodes (point-wise) 
+```{r}
+set.seed(123)
+avg_dti_signodes <- read.csv("results/avg_dti_signodes.csv")
+correlation_results <- data.frame()
+
+i <- 0
+for (dd in unique(avg_dti_signodes$metric)){
+  for (tt in unique(avg_dti_signodes$tractID)){
+    
+    df <- avg_dti_signodes %>% filter(metric == dd & tractID == tt & Dx == "ASD")
+    for (nn in unique(df$signodes)){
+      i <- i +1
+      df_new <- df_avg %>% filter(signodes == nn)
+      
+      model <- lm(avg_value_signodes ~ ADOS_Total + Age + Gender, data = df_new)
+      observed_coeff <- summary(model)$coefficients[2, "Estimate"]
+      observed_p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+      cor_r <- cor.test(predict(model), df_new$ADOS_Total)
+      
+      # Perform permutation test
+      permuted_coeffs <- numeric()
+      for (j in 1:5000) {
+        perm_data <- df_new
+        perm_data$avg_value_signodes <- sample(perm_data$avg_value_signodes)
+        permuted_model <- lm(avg_value_signodes ~ Gesell_Lang + Age + Gender, data = perm_data)
+        permuted_coeffs[j] <- summary(permuted_model)$coefficients[2, "Estimate"]
+       }
+      
+      p_value_perm <- mean(abs(permuted_coeffs) >= abs(observed_coeff))
+      
+      correlation_results[i,1:7] <- c(tt,dd,nn,
+                                      observed_coeff,
+                                      observed_p_value,
+                                      p_value_perm,
+                                      cor_r$estimate)
+      }
+  }
+}
+
+colnames(correlation_results) <- c("tractID","DTI_metric","signodes",
+                                   "regression_coefficients",
+                                   "p_value","perm_p_value","cor_r_value")
+
+View(correlation_results)
+
+write.csv(correlation_results, "results/correlation_results_signodes_ADOS.csv", 
+	  row.names = FALSE)
+
+## scatter plots between sig. nodes & ADOS (point-wise)
+
+aa <- read.csv("results/correlation_results_signodes_ADOS.csv")
+
+data_scatter <- aa %>% filter(p_value < 0.05)
+
+
+for (i in 1:nrow(plot_data)){
+  tmp <- data_scatter %>% filter(DTI_metric == data_scatter$DTI_metric[i]  &
+                                   tractID == data_scatter$tractID[i])
+  #sig_nodes <- as.numeric(strsplit(tmp$signodes,"-")[[1]])
+  
+  df <- df_avg %>% filter(metric == data_scatter$DTI_metric[i] & 
+                               tractID == data_scatter$tractID[i] &
+                               signodes %in% tmp$signodes & 
+                               Dx == "ASD")
+    
+    # predict
+    ff <- formula(avg_value_signodes ~ ADOS_Total + Age + Gender)
+    model <- lm(ff, data = df)
+    df$pred <- predict(model, newdata = df)
+    
+    title <- paste0(data_scatter$DTI_metric[i]," ", 
+                          data_scatter$tractID[i])
+    
+    p <- ggplot(df, aes(x = ADOS_Total, y = avg_value_signodes)) +
+      geom_point(size = 5, color="#e47159") +
+      geom_smooth(method = "lm", se = FALSE, aes(y = pred),
+                  color="black",size = 1.8) +
+      labs(title = title, 
+           x = NULL, y = NULL) +
+      theme_classic() +
+      theme(axis.ticks.length = unit(0.25, "cm"), 
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5), 
+        #axis.text = element_blank(),
+        axis.line.x = element_line(size = 2),
+        axis.line.y = element_line(size = 2),
+        legend.position = "none")
+    
+    
+  if (plot_data$DTI_metric[i] == "dti_rd") {
+  	p <- p + coord_cartesian(xlim = c(5, 25), ylim = c(0.0006, 0.0009))
+  } else if (plot_data$DTI_metric[i] == "dti_fa") {
+  	p <- p + coord_cartesian(xlim = c(5, 25), ylim = c(0.35, 0.5))
+  }
+}
+    
+    # Save the plot
+    ggsave(paste0("results/",title,"_ADOS_signodes.png"), width = 5, height = 4)
+
+    
+
+```
+
+

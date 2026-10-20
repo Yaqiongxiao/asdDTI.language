@@ -1,4 +1,4 @@
-## Data Usage Policy: These data are for verification only. Secondary use requires written permission.
+**Data Usage Policy:** These data are for verification only. Secondary use requires written permission.
 
 # Altered white matter connectivity and its associations with language abilities in young children with autism spectrum disorder
 This manuscript is currently under review. 
